@@ -9,7 +9,7 @@ export default defineConfig({
     react(),
     visualizer({
       filename: "bundle-stats.html", // Output file for the analysis
-      open: true, // Automatically open the file in the browser
+      open: false, // Automatically open the file in the browser if true
       gzipSize: true, // Show gzip sizes
       brotliSize: true, // Show brotli sizes
       // template: 'network', // sunburst, treemap, network, raw-data, list, flamegraph
