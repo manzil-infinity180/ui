@@ -91,23 +91,40 @@ func FetchYamlFile(ctx context.Context, github_url string, path string) (*Deploy
 		return nil, fmt.Errorf("error decoding response: %v", err)
 	}
 
-	var deployment Deployment
+	/*
+		// LIMITATION
+		* We are currently supports only Deployment through github url and it have some restricted file structure
+		* The best way to structure the file is to just keep one deployment.yaml file inside some directory
+		* Ex - public/examples -> deployment.yaml
+	*/
 	for _, file := range files {
-		if strings.HasSuffix(file.Name, ".yml") || strings.HasSuffix(file.Name, ".yaml") {
+		if (strings.HasSuffix(file.Name, ".yml") || strings.HasSuffix(file.Name, ".yaml")) &&
+			strings.Contains(file.Name, "deployment") {
+
+			// Download the YAML file content
 			content, err := GetYamlFile(ctx, file.DownloadURL)
 			if err != nil {
 				fmt.Printf("Error downloading %s: %v\n", file.Name, err)
-				continue
+				continue // Skip to the next file
 			}
 
 			fmt.Printf("Downloaded: %s\n", file.Name)
 
+			// Unmarshal YAML into Deployment struct
+			var deployment Deployment
 			if err := yaml.Unmarshal([]byte(content), &deployment); err != nil {
-				return nil, fmt.Errorf("error Unmarshal response: %v", err)
+				return nil, fmt.Errorf("error unmarshalling %s: %v", file.Name, err)
+			}
+
+			if strings.ToLower(deployment.Kind) == "deployment" {
+				return &deployment, nil
+			} else {
+				return nil, fmt.Errorf("invalid kind in %s: %s", file.Name, deployment.Kind)
 			}
 		}
 	}
-	return &deployment, nil
+
+	return nil, fmt.Errorf("no valid deployment workloads found")
 
 }
 
