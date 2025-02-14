@@ -59,4 +59,4 @@ func GetClientSetKubeConfig() (*kubernetes.Clientset, error) {
 	return clientset, nil
 }
 
-// check
+// check ok
