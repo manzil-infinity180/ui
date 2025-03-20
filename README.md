@@ -1,4 +1,4 @@
-# KubestellarUI Setup Guide
+# KubestellarUI Setup Guide UI
 
 Welcome to **KubestellarUI**! This guide will help you set up the KubestellarUI application on your local machine after cloning the repository for development. The application consists of two main parts:
 
