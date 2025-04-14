@@ -158,7 +158,7 @@ func handleTerminalSession(session sockjs.Session) {
 	terminalSession.bound <- nil
 }
 
-func CreateAttachHandler(path string) http.Handler {
+func CreateSockjsAttachHandler(path string) http.Handler {
 	return sockjs.NewHandler(path, sockjs.DefaultOptions, handleTerminalSession)
 }
 func genTerminalSessionId() (string, error) {
@@ -171,7 +171,7 @@ func genTerminalSessionId() (string, error) {
 	return string(id), nil
 }
 
-func isValidShell(validShells []string, shell string) bool {
+func isValidShellCmd(validShells []string, shell string) bool {
 	for _, validShell := range validShells {
 		if validShell == shell {
 			return true
@@ -180,7 +180,7 @@ func isValidShell(validShells []string, shell string) bool {
 	return false
 }
 
-func startProcess(c *gin.Context, clientSet *kubernetes.Clientset, cfg *rest.Config, cmd []string, ptyHandler PtyHandler) error {
+func startShellProcess(c *gin.Context, clientSet *kubernetes.Clientset, cfg *rest.Config, cmd []string, ptyHandler PtyHandler) error {
 	namespace := c.Param("namespace")
 	podName := c.Param("pod")
 	containerName := c.Param("container")
@@ -217,20 +217,20 @@ func startProcess(c *gin.Context, clientSet *kubernetes.Clientset, cfg *rest.Con
 	return nil
 }
 
-func waitForTerminal(c *gin.Context, clientSet *kubernetes.Clientset, cfg *rest.Config, sessionId string) {
+func waitForShell(c *gin.Context, clientSet *kubernetes.Clientset, cfg *rest.Config, sessionId string) {
 	shell := c.Query("shell")
 	select {
 	case <-terminalSessions.Get(sessionId).bound:
 		close(terminalSessions.Get(sessionId).bound)
 		var err error
 		validShells := []string{"bash", "sh", "powershell", "cmd"}
-		if isValidShell(validShells, shell) {
+		if isValidShellCmd(validShells, shell) {
 			cmd := []string{shell}
-			err = startProcess(c, clientSet, cfg, cmd, terminalSessions.Get(sessionId))
+			err = startShellProcess(c, clientSet, cfg, cmd, terminalSessions.Get(sessionId))
 		} else {
 			for _, testShell := range validShells {
 				cmd := []string{testShell}
-				if err := startProcess(c, clientSet, cfg, cmd, terminalSessions.Get(sessionId)); err == nil {
+				if err := startShellProcess(c, clientSet, cfg, cmd, terminalSessions.Get(sessionId)); err == nil {
 					break
 				}
 			}
@@ -249,7 +249,7 @@ func waitForTerminal(c *gin.Context, clientSet *kubernetes.Clientset, cfg *rest.
 }
 
 // /pod/{namespace}/{pod}/shell/{container}?context
-func HandleExecShell(c *gin.Context) {
+func HandlePodExecShell(c *gin.Context) {
 	sessionID, err := genTerminalSessionId()
 	if err != nil {
 		//
@@ -271,7 +271,7 @@ func HandleExecShell(c *gin.Context) {
 		bound:    make(chan error),
 		sizeChan: make(chan remotecommand.TerminalSize),
 	})
-	go waitForTerminal(c, clientset, restConfig, sessionID)
+	go waitForShell(c, clientset, restConfig, sessionID)
 	c.JSON(http.StatusOK, gin.H{
 		"id": sessionID,
 	})

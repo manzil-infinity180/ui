@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"github.com/kubestellar/ui/wecs"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"time"
 
@@ -40,7 +42,7 @@ func main() {
 
 		c.Next()
 	})
-
+	http.Handle("/api/sockjs/", wecs.CreateSockjsAttachHandler("/api/sockjs"))
 	routes.SetupRoutes(router)
 	router.POST("api/webhook", api.GitHubWebhookHandler)
 
