@@ -1,5 +1,6 @@
 package wecs
 
+// Credit: Kubernetes dashboard (https://github.com/kubernetes/dashboard)
 import (
 	"crypto/rand"
 	"encoding/hex"
@@ -219,31 +220,40 @@ func startShellProcess(c *gin.Context, clientSet *kubernetes.Clientset, cfg *res
 
 func waitForShell(c *gin.Context, clientSet *kubernetes.Clientset, cfg *rest.Config, sessionId string) {
 	shell := c.Query("shell")
+	terminalSession := terminalSessions.Get(sessionId)
+	if terminalSession.id == "" {
+		fmt.Printf("Session %s not found\n", sessionId)
+		return
+	}
 	select {
-	case <-terminalSessions.Get(sessionId).bound:
-		close(terminalSessions.Get(sessionId).bound)
+	case <-terminalSession.bound:
+		//close(terminalSessions.Get(sessionId).bound)
 		var err error
 		validShells := []string{"bash", "sh", "powershell", "cmd"}
 		if isValidShellCmd(validShells, shell) {
 			cmd := []string{shell}
-			err = startShellProcess(c, clientSet, cfg, cmd, terminalSessions.Get(sessionId))
+			err = startShellProcess(c, clientSet, cfg, cmd, terminalSession)
 		} else {
 			for _, testShell := range validShells {
 				cmd := []string{testShell}
-				if err := startShellProcess(c, clientSet, cfg, cmd, terminalSessions.Get(sessionId)); err == nil {
+				if err := startShellProcess(c, clientSet, cfg, cmd, terminalSession); err == nil {
 					break
 				}
 			}
 		}
 		if err != nil {
+			fmt.Printf("Error starting shell process: %v\n", err)
 			terminalSessions.Close(sessionId, 2, err.Error())
 			return
 		}
+		fmt.Printf("Shell process exited for session %s\n", sessionId)
 		terminalSessions.Close(sessionId, 1, "Process exited")
 
 	case <-time.After(10 * time.Minute):
-		close(terminalSessions.Get(sessionId).bound)
+		//close(terminalSessions.Get(sessionId).bound)
+		terminalSessions.Lock.Lock()
 		delete(terminalSessions.Sessions, sessionId)
+		terminalSessions.Lock.Unlock()
 		return
 	}
 }
@@ -259,12 +269,14 @@ func HandlePodExecShell(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "no context present as query",
 		})
+		return
 	}
 	clientset, restConfig, err := k8s.GetClientSetWithConfigContext(context)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "error while setting the context",
 		})
+		return
 	}
 	terminalSessions.Set(sessionID, TerminalSession{
 		id:       sessionID,
@@ -275,4 +287,5 @@ func HandlePodExecShell(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"id": sessionID,
 	})
+	fmt.Printf("Session ID %s created and processing shell", sessionID)
 }

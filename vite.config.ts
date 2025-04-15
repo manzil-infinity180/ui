@@ -33,6 +33,7 @@ export default defineConfig({
   // Ensures commit hash is available during build and runtime
   define: {
     'import.meta.env.VITE_GIT_COMMIT_HASH': JSON.stringify(getGitCommitHash()),
+    global: 'window'
   },
 
   build: {
