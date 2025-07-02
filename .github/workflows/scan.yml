@@ -1,0 +1,136 @@
+
+name: Trivy Vulnerability Scanner
+
+# This workflow requires write permission for issues to create them.
+permissions:
+ issues: write
+ contents: read # for actions/checkout
+ security-events: write # for github/codeql-action/upload-sarif
+
+on:
+ pull_request:
+   paths:
+     - '**/package*.json'
+     - '**/go.mod'
+     - '**/go.sum'
+     - '**/Dockerfile'
+     - '.github/workflows/**'
+
+jobs:
+ scan:
+   name: Scan for Vulnerabilities
+   runs-on: ubuntu-latest
+   outputs:
+     # This output will be used to decide if the 'create-issue' job should run
+     vulnerabilities_found: ${{ steps.parse-results.outputs.vulnerabilities_found }}
+
+   steps:
+     - name: Checkout code
+       uses: actions/checkout@v4
+
+     - name: Run Trivy vulnerability scanner
+       uses: aquasecurity/trivy-action@master
+       id: trivy-scan
+       with:
+         # Scan the entire filesystem
+         scan-type: 'fs'
+         
+         # We need two formats: SARIF for the security tab and JSON for issue creation
+         format: 'template'
+         template: '@/contrib/sarif.tpl'
+         output: 'trivy-results.sarif'
+
+         # Scan for OS and library vulnerabilities of CRITICAL and HIGH severity
+         severity: 'CRITICAL,HIGH'
+         vuln-type: 'os,library'
+
+         # Do not fail the workflow on this step
+         exit-code: '0'
+
+         # Also output a JSON report for the next steps
+         # We pass this as an argument to the underlying trivy CLI
+         args: |
+           --format json
+           --output trivy-results.json
+           --no-progress
+
+     - name: Check for vulnerabilities
+       id: parse-results
+       run: |
+         # Use jq to check if the 'Results' array in the JSON output is null or empty.
+         # If it contains items, vulnerabilities were found.
+         if jq -e '.Results // [] | length > 0' trivy-results.json; then
+           echo "Vulnerabilities found. Preparing to create an issue."
+           echo "vulnerabilities_found=true" >> $GITHUB_OUTPUT
+         else
+           echo "No high or critical vulnerabilities found."
+           echo "vulnerabilities_found=false" >> $GITHUB_OUTPUT
+         fi
+         
+     - name: Upload Trivy JSON report as an artifact
+       if: steps.parse-results.outputs.vulnerabilities_found == 'true'
+       uses: actions/upload-artifact@v4
+       with:
+         name: trivy-json-report
+         path: trivy-results.json
+         retention-days: 1
+
+     - name: Upload Trivy SARIF report to GitHub Security tab
+       # This step always runs, even if no vulns are found, to clear previous alerts
+       uses: github/codeql-action/upload-sarif@v3
+       with:
+         sarif_file: 'trivy-results.sarif'
+         # We specify a category to distinguish these alerts from other tools
+         category: trivy-fs
+
+ create-issue:
+   name: Create Vulnerability Issue
+   # This job only runs if the 'scan' job found vulnerabilities
+   needs: [scan]
+   if: needs.scan.outputs.vulnerabilities_found == 'true'
+   runs-on: ubuntu-latest
+
+   steps:
+     - name: Download Trivy JSON report
+       uses: actions/download-artifact@v4
+       with:
+         name: trivy-json-report
+     
+     - name: Prepare Issue Content
+       id: prepare-issue
+       run: |
+         # Create a nicely formatted markdown table from the JSON report
+         ISSUE_BODY=$(jq -r '
+           "### 🚨 Vulnerabilities Detected in PR #${{ github.event.pull_request.number }}\n\n" +
+           "Trivy has detected the following high or critical vulnerabilities. Please investigate and address them.\n\n" +
+           "| Severity | Package | Version | Vulnerability ID | Fix Version |\n" +
+           "|---|---|---|---|---|\n" +
+           ( .Results[]? | .Vulnerabilities[]? |
+             "| \(.Severity) | \(.PkgName) | \(.InstalledVersion) | [\(.VulnerabilityID)](https://avd.aquasec.com/nvd/\(.VulnerabilityID|ascii_downcase)) | \(.FixedVersion // "N/A") |"
+           )
+         ' trivy-results.json)
+         
+         # Use a heredoc to properly handle multiline content for the output
+         {
+           echo "body<<EOF"
+           echo "$ISSUE_BODY"
+           echo "EOF"
+         } >> "$GITHUB_OUTPUT"
+
+     - name: Create GitHub Issue
+       uses: JasonEtco/create-an-issue@v2
+       env:
+         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+       with:
+         # The title includes the PR number to help with deduplication
+         title: "Security Vulnerabilities Detected in PR #${{ github.event.pull_request.number }}"
+         body: ${{ steps.prepare-issue.outputs.body }}
+         # Assign the person who opened the pull request
+         assignees: ${{ github.actor }}
+         # Add labels to the issue for easy filtering
+         labels: |
+           security
+           vulnerability
+    ```
+    
+    Let me know what do you think bout it..
