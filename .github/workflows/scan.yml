@@ -29,8 +29,9 @@ jobs:
         run: |
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
 
-      - name: Run Trivy scan and generate reports
+      - name: Run Trivy scan and generate reports (SARIF + JSON)
         run: |
+          # SARIF for GitHub Security tab
           trivy fs \
             --format template \
             --template '@/contrib/sarif.tpl' \
@@ -39,6 +40,7 @@ jobs:
             --vuln-type os,library \
             --no-progress .
 
+          # JSON for parsing + issue generation
           trivy fs \
             --format json \
             --output trivy-results.json \
@@ -46,18 +48,16 @@ jobs:
             --vuln-type os,library \
             --no-progress .
 
-      - name: Check for vulnerabilities
+      - name: Check for HIGH or CRITICAL vulnerabilities
         id: parse-results
         run: |
           if jq -e '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH" or .Severity=="CRITICAL")] | length > 0' trivy-results.json; then
-            echo "Vulnerabilities found. Preparing to create an issue."
             echo "vulnerabilities_found=true" >> $GITHUB_OUTPUT
           else
-            echo "No high or critical vulnerabilities found."
             echo "vulnerabilities_found=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Upload Trivy JSON report as an artifact
+      - name: Upload Trivy JSON report as artifact
         if: steps.parse-results.outputs.vulnerabilities_found == 'true'
         uses: actions/upload-artifact@v4
         with:
@@ -65,7 +65,7 @@ jobs:
           path: trivy-results.json
           retention-days: 1
 
-      - name: Upload Trivy SARIF report to GitHub Security tab
+      - name: Upload SARIF to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: 'trivy-results.sarif'
@@ -83,12 +83,12 @@ jobs:
         with:
           name: trivy-json-report
 
-      - name: Prepare Issue Content
+      - name: Prepare GitHub Issue content
         id: prepare-issue
         run: |
           ISSUE_BODY=$(jq -r '
             "### 🚨 Vulnerabilities Detected in PR #${{ github.event.pull_request.number }}\n\n" +
-            "Trivy has detected the following high or critical vulnerabilities. Please investigate and address them.\n\n" +
+            "Trivy has detected the following HIGH or CRITICAL vulnerabilities. Please investigate and address them.\n\n" +
             "| Severity | Package | Version | Vulnerability ID | Fix Version |\n" +
             "|---|---|---|---|---|\n" +
             ( .Results[]? | .Vulnerabilities[]? |
@@ -107,7 +107,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          title: "Security Vulnerabilities Detected in PR #${{ github.event.pull_request.number }}"
+          title: "🔒 Security Vulnerabilities Detected in PR #${{ github.event.pull_request.number }}"
           body: ${{ steps.prepare-issue.outputs.body }}
           assignees: ${{ github.actor }}
           labels: |
