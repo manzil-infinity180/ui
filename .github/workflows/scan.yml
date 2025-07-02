@@ -131,6 +131,3 @@ jobs:
          labels: |
            security
            vulnerability
-    ```
-    
-    Let me know what do you think bout it..
