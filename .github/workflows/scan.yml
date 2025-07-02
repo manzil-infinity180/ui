@@ -104,12 +104,11 @@ jobs:
             } >> "$GITHUB_OUTPUT"
 
 
-      - name: Create GitHub Issue
-        uses: peter-evans/create-issue@v5
+      - name: Create Issue From File
+        uses: peter-evans/create-issue-from-file@v5
         with:
-          title: "🔒 Security Vulnerabilities Detected in PR #${{ github.event.pull_request.number }}"
-          body: ${{ steps.prepare-issue.outputs.body }}
+          title: An example issue
+          content-filepath: ./example-content/output.md
           labels: |
-            security
-            vulnerability
-          assignees: ${{ github.actor }}
+            report
+            automated issue
