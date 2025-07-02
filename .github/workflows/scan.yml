@@ -1,7 +1,7 @@
 
 name: Trivy Vulnerability Scanner
 
-# This workflow requires write permission for issues to create them.
+
 permissions:
  issues: write
  contents: read # for actions/checkout
