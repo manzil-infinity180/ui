@@ -105,13 +105,11 @@ jobs:
 
 
       - name: Create GitHub Issue
-        uses: JasonEtco/create-an-issue@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: peter-evans/create-issue@v5
         with:
           title: "🔒 Security Vulnerabilities Detected in PR #${{ github.event.pull_request.number }}"
           body: ${{ steps.prepare-issue.outputs.body }}
-          assignees: ${{ github.actor }}
           labels: |
             security
             vulnerability
+          assignees: ${{ github.actor }}
