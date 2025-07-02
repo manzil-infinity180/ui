@@ -83,32 +83,28 @@ jobs:
         with:
           name: trivy-json-report
 
-      - name: Prepare GitHub Issue content
-        id: prepare-issue
+      - name: Prepare GitHub Issue Markdown file
         run: |
-          # Write the jq filter to a temporary file to avoid quote issues
           cat <<'EOF' > filter.jq
             "### 🚨 Vulnerabilities Detected in PR #${{ github.event.pull_request.number }}\n\n" +
             "Trivy has detected the following HIGH or CRITICAL vulnerabilities. Please investigate and address them.\n\n" +
             "| Severity | Package | Version | Vulnerability ID | Fix Version |\n" +
             "|---|---|---|---|---|\n" +
             ( .Results[]? | .Vulnerabilities[]? |
-              "| \(.Severity) | \(.PkgName) | \(.InstalledVersion) | [\(.VulnerabilityID)](https://avd.aquasec.com/nvd/\(.VulnerabilityID | ascii_downcase)) | \(.FixedVersion // "N/A") |"
+              "| \(.Severity) | \(.PkgName) | \(.InstalledVersion) | [\(.VulnerabilityID)](https://avd.aquasec.com/nvd/\(.VulnerabilityID | ascii_downcase)) | \(.FixedVersion // \"N/A\") |"
             )
-            EOF
-            ISSUE_BODY=$(jq -r -f filter.jq trivy-results.json)    
-            {
-              echo "body<<EOF"
-              echo "$ISSUE_BODY"
-              echo "EOF"
-            } >> "$GITHUB_OUTPUT"
+          EOF
+          jq -r -f filter.jq trivy-results.json > cve-issue-report.md
 
 
-      - name: Create Issue From File
+      - name: Create GitHub Issue (deduplicated)
         uses: peter-evans/create-issue-from-file@v5
         with:
-          title: An example issue
-          content-filepath: ./example-content/output.md
+          title: "🔒 Security Vulnerabilities Detected in PR #${{ github.event.pull_request.number }}"
+          content-filepath: cve-issue-report.md
           labels: |
-            report
-            automated issue
+            security
+            vulnerability
+          assignees: ${{ github.actor }}
+          search-existing: all
+          update-existing: false
