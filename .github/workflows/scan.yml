@@ -74,17 +74,17 @@ jobs:
     needs: [scan]
     if: needs.scan.outputs.vulnerabilities_found == 'true'
     runs-on: ubuntu-latest
-
+  
     steps:
-      - name: Checkout repo (required to write file)
+      - name: Checkout repo
         uses: actions/checkout@v4
-
+  
       - name: Download Trivy JSON report
         uses: actions/download-artifact@v4
         with:
           name: trivy-json-report
-
-      - name: Prepare GitHub Issue Markdown file
+  
+      - name: Generate issue content file
         run: |
           cat <<'EOF' > filter.jq
             "### 🚨 Vulnerabilities Detected in PR #${{ github.event.pull_request.number }}\n\n" +
@@ -94,9 +94,11 @@ jobs:
             ( .Results[]? | .Vulnerabilities[]? |
               "| \(.Severity) | \(.PkgName) | \(.InstalledVersion) | [\(.VulnerabilityID)](https://avd.aquasec.com/nvd/\(.VulnerabilityID | ascii_downcase)) | \(.FixedVersion // \"N/A\") |"
             )
-            EOF
+          EOF
+  
           jq -r -f filter.jq trivy-results.json > cve-issue-report.md
-
+          ls -la
+  
       - name: Create GitHub Issue (deduplicated)
         uses: peter-evans/create-issue-from-file@v5
         with:
