@@ -1,0 +1,341 @@
+name: Trivy Vulnerability Scanner
+permissions:
+  issues: write
+  contents: read
+  security-events: write
+  pull-requests: read
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+    paths:
+      - "**/package*.json"
+      - "**/go.mod"
+      - "**/go.sum"
+      - "**/Dockerfile"
+      - ".github/workflows/**"
+
+jobs:
+  # Handle PR closure/abandonment
+  handle-pr-closure:
+    name: Handle PR Closure
+    if: github.event.action == 'closed' && github.event.pull_request.merged == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find and handle associated security issues
+        run: |
+          echo "PR #${{ github.event.pull_request.number }} was closed without merging"
+
+          # Find issues created for this PR
+          ISSUES=$(gh issue list --state open --label "security,vulnerability,pr-${{ github.event.pull_request.number }}" --json number,title,body --jq '.[] | {number, title, body}')
+
+          if [ ! -z "$ISSUES" ]; then
+            echo "Found associated security issues:"
+            echo "$ISSUES" | jq -r '.number'
+            
+            # Process each issue
+            echo "$ISSUES" | jq -r '.number' | while read issue_num; do
+              if [ ! -z "$issue_num" ]; then
+                echo "Processing issue #$issue_num"
+                
+                # Add comment explaining PR closure
+                gh issue comment "$issue_num" --body $'🚫 **PR Closed Without Merging**
+
+              PR #${{ github.event.pull_request.number }} was closed without being merged on $(date -u +%Y-%m-%d).
+
+              **Actions taken:**
+              - Removing PR-specific label
+              - Checking if vulnerabilities exist in other open PRs
+              - Will auto-close this issue if no other PRs are affected
+
+              **Reason for PR closure:** ${{ github.event.pull_request.title }}
+              **Closed by:** @${{ github.event.pull_request.user.login }}'
+
+                # Remove PR-specific label
+                gh issue edit "$issue_num" --remove-label "pr-${{ github.event.pull_request.number }}"
+                
+                # Check if this vulnerability exists in other open PRs or main branch
+                ISSUE_BODY=$(gh issue view "$issue_num" --json body --jq '.body')
+                
+                # Extract CVE IDs from issue body
+                CVE_IDS=$(echo "$ISSUE_BODY" | grep -oE 'CVE-[0-9]{4}-[0-9]+' | sort -u)
+                
+                if [ ! -z "$CVE_IDS" ]; then
+                  echo "Checking if CVEs still exist in other contexts..."
+                  
+                  # Check if any other open PRs have the same CVEs
+                  OTHER_PRS=$(gh pr list --state open --json number --jq '.[].number' | grep -v "${{ github.event.pull_request.number }}" || true)
+                  
+                  if [ ! -z "$OTHER_PRS" ]; then
+                    echo "Checking other open PRs: $OTHER_PRS"
+                    # Add label for manual review
+                    gh issue edit "$issue_num" --add-label "needs-review"
+                    
+                    gh issue comment "$issue_num" --body "⚠️ **Manual Review Required**
+
+          This issue needs manual review to determine if the vulnerabilities still exist in:
+          - Other open PRs: $OTHER_PRS
+          - Main/master branch
+          - Production environment
+
+              Please review and close if vulnerabilities are not present elsewhere."
+                  else
+                    echo "No other open PRs found"
+                    gh issue edit "$issue_num" --add-label "auto-review-candidate"
+                    
+                    gh issue comment "$issue_num" --body "🔍 **Auto-Review Candidate**
+
+              No other open PRs found. This issue is a candidate for auto-closure.
+
+            **Next steps:**
+            1. Manual verification that vulnerabilities don't exist in main branch
+            2. Close issue if confirmed clean
+            3. Keep open if vulnerabilities exist in production
+
+            **CVE IDs to check:** $(echo "$CVE_IDS" | tr '\n' ' ')"
+                  fi
+                else
+                  echo "No CVE IDs found in issue body"
+                fi
+              fi
+            done
+          else
+            echo "No associated security issues found for this PR"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  scan:
+    name: Scan for Vulnerabilities
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    outputs:
+      vulnerabilities_found: ${{ steps.parse-results.outputs.vulnerabilities_found }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Run Trivy scan and generate reports (SARIF + JSON)
+        run: |
+          trivy fs \
+            --format template \
+            --template '@/contrib/sarif.tpl' \
+            --output trivy-results.sarif \
+            --severity CRITICAL,HIGH \
+            --vuln-type os,library \
+            --no-progress .
+          trivy fs \
+            --format json \
+            --output trivy-results.json \
+            --severity CRITICAL,HIGH \
+            --vuln-type os,library \
+            --no-progress .
+
+      - name: Check for HIGH or CRITICAL vulnerabilities
+        id: parse-results
+        run: |
+          if jq -e '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH" or .Severity=="CRITICAL")] | length > 0' trivy-results.json; then
+            echo "vulnerabilities_found=true" >> $GITHUB_OUTPUT
+          else
+            echo "vulnerabilities_found=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload Trivy JSON report as artifact
+        if: steps.parse-results.outputs.vulnerabilities_found == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-json-report
+          path: trivy-results.json
+          retention-days: 7
+
+      - name: Upload SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: "trivy-results.sarif"
+          category: trivy-fs
+
+  create-issue:
+    name: Create Vulnerability Issue
+    needs: [scan]
+    if: needs.scan.outputs.vulnerabilities_found == 'true' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Download Trivy JSON report
+        uses: actions/download-artifact@v4
+        with:
+          name: trivy-json-report
+
+      - name: Generate issue content file
+        run: |
+          cat <<'EOF' > filter.jq
+          "### 🚨 Vulnerabilities Detected in PR #${{ github.event.pull_request.number }}\n\n" +
+          "Trivy has detected the following HIGH or CRITICAL vulnerabilities. Please investigate and address them.\n\n" +
+          "**PR Details:**\n" +
+          "- **Title:** ${{ github.event.pull_request.title }}\n" +
+          "- **Author:** @${{ github.event.pull_request.user.login }}\n" +
+          "- **Branch:** `${{ github.event.pull_request.head.ref }}`\n" +
+          "- **Commit:** ${{ github.event.pull_request.head.sha }}\n\n" +
+          "| Severity | Package | Version | Vulnerability ID | Fix Version |\n" +
+          "|---|---|---|---|---|\n" +
+          (
+            .Results[]? | .Vulnerabilities[]? | 
+            select(.Severity == "HIGH" or .Severity == "CRITICAL") |
+            "| " + .Severity + " | " + .PkgName + " | " + .InstalledVersion + " | [" + .VulnerabilityID + "](https://avd.aquasec.com/nvd/" + (.VulnerabilityID | ascii_downcase) + ") | " + (.FixedVersion // "N/A") + " |"
+          ) +
+          "\n\n---\n\n" +
+          "**How to Fix:**\n" +
+          "1. Review the vulnerabilities listed above\n" +
+          "2. Update the affected packages to the fixed versions\n" +
+          "3. Run `npm audit fix` for Node.js dependencies\n" +
+          "4. Run `go get -u` for Go dependencies\n" +
+          "5. Re-run the security scan to verify fixes\n\n" +
+          "**Additional Resources:**\n" +
+          "- [OWASP Dependency Check](https://owasp.org/www-project-dependency-check/)\n" +
+          "- [Snyk Vulnerability Database](https://snyk.io/vuln/)\n" +
+          "- [GitHub Security Advisories](https://github.com/advisories)"
+          EOF
+
+          jq -r -f filter.jq trivy-results.json > cve-issue-report.md
+
+      - name: Check for existing vulnerability issues
+        id: check-existing
+        run: |
+          # Extract unique vulnerability IDs from the current scan
+          VULN_IDS=$(jq -r '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH" or .Severity == "CRITICAL") | .VulnerabilityID] | unique | join(",")' trivy-results.json)
+          echo "vuln_ids=$VULN_IDS" >> $GITHUB_OUTPUT
+
+          # Check if any existing open issues contain these vulnerability IDs
+          EXISTING_ISSUES=""
+          if [ ! -z "$VULN_IDS" ]; then
+            IFS=',' read -ra VULN_ARRAY <<< "$VULN_IDS"
+            for vuln in "${VULN_ARRAY[@]}"; do
+              # Search for existing open issues with this vulnerability ID
+              ISSUE_COUNT=$(gh issue list --state open --label "security,vulnerability" --search "$vuln" --json number --jq '. | length')
+              if [ "$ISSUE_COUNT" -gt 0 ]; then
+                EXISTING_ISSUES="$EXISTING_ISSUES$vuln,"
+              fi
+            done
+          fi
+
+          if [ ! -z "$EXISTING_ISSUES" ]; then
+            echo "existing_issues=true" >> $GITHUB_OUTPUT
+            echo "existing_vulns=$EXISTING_ISSUES" >> $GITHUB_OUTPUT
+          else
+            echo "existing_issues=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Filter new vulnerabilities
+        if: steps.check-existing.outputs.existing_issues == 'true'
+        id: filter-new
+        run: |
+          # Create a filter to exclude existing vulnerabilities
+          EXISTING_VULNS="${{ steps.check-existing.outputs.existing_vulns }}"
+
+          cat <<EOF > filter-new.jq
+          "### 🚨 New Vulnerabilities Detected in PR #${{ github.event.pull_request.number }}\n\n" +
+          "Trivy has detected the following NEW HIGH or CRITICAL vulnerabilities. Please investigate and address them.\n\n" +
+          "**PR Details:**\n" +
+          "- **Title:** ${{ github.event.pull_request.title }}\n" +
+          "- **Author:** @${{ github.event.pull_request.user.login }}\n" +
+          "- **Branch:** \`${{ github.event.pull_request.head.ref }}\`\n" +
+          "- **Commit:** ${{ github.event.pull_request.head.sha }}\n\n" +
+          "| Severity | Package | Version | Vulnerability ID | Fix Version |\n" +
+          "|---|---|---|---|---|\n" +
+          (
+            .Results[]? | .Vulnerabilities[]? | 
+            select(.Severity == "HIGH" or .Severity == "CRITICAL") |
+            select(.VulnerabilityID | IN("$EXISTING_VULNS" | split(",")[]) | not) |
+            "| " + .Severity + " | " + .PkgName + " | " + .InstalledVersion + " | [" + .VulnerabilityID + "](https://avd.aquasec.com/nvd/" + (.VulnerabilityID | ascii_downcase) + ") | " + (.FixedVersion // "N/A") + " |"
+          )
+          EOF
+
+          # Check if there are any new vulnerabilities
+          NEW_VULNS=$(jq -r -f filter-new.jq trivy-results.json)
+          if echo "$NEW_VULNS" | grep -q "| "; then
+            echo "$NEW_VULNS" > cve-issue-report.md
+            echo "has_new_vulns=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_new_vulns=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Issue for new vulnerabilities only
+        if: steps.check-existing.outputs.existing_issues == 'false' || (steps.check-existing.outputs.existing_issues == 'true' && steps.filter-new.outputs.has_new_vulns == 'true')
+        uses: peter-evans/create-issue-from-file@v5
+        with:
+          title: "🔒 Security Vulnerabilities Detected in PR #${{ github.event.pull_request.number }}"
+          content-filepath: cve-issue-report.md
+          labels: |
+            security
+            vulnerability
+            high-priority
+            pr-${{ github.event.pull_request.number }}
+          assignees: ${{ github.event.pull_request.user.login }}
+
+      - name: Comment on existing issues if vulnerabilities still present
+        if: steps.check-existing.outputs.existing_issues == 'true'
+        run: |
+          EXISTING_VULNS="${{ steps.check-existing.outputs.existing_vulns }}"
+          IFS=',' read -ra VULN_ARRAY <<< "$EXISTING_VULNS"
+
+          for vuln in "${VULN_ARRAY[@]}"; do
+            if [ ! -z "$vuln" ]; then
+              # Find the issue number for this vulnerability
+              ISSUE_NUM=$(gh issue list --state open --label "security,vulnerability" --search "$vuln" --json number --jq '.[0].number // empty')
+              
+              if [ ! -z "$ISSUE_NUM" ]; then
+                gh issue comment "$ISSUE_NUM" --body "⚠️ **Vulnerability $vuln detected again in PR #${{ github.event.pull_request.number }}**
+
+              This vulnerability was detected in a new PR:
+              - **PR Title:** ${{ github.event.pull_request.title }}
+              - **Author:** @${{ github.event.pull_request.user.login }}
+              - **Branch:** \`${{ github.event.pull_request.head.ref }}\`
+              - **Commit:** ${{ github.event.pull_request.head.sha }}
+
+              Please prioritize fixing this recurring security issue before merging any affected PRs."
+
+                # Add PR label to existing issue for tracking
+                gh issue edit "$ISSUE_NUM" --add-label "pr-${{ github.event.pull_request.number }}"
+              fi
+            fi
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add PR comment with security summary
+        if: always()
+        run: |
+          VULN_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH" or .Severity == "CRITICAL")] | length' trivy-results.json)
+
+          if [ "$VULN_COUNT" -gt 0 ]; then
+            gh pr comment ${{ github.event.pull_request.number }} --body "🔒 **Security Scan Results**
+
+           ⚠️ **$VULN_COUNT HIGH/CRITICAL vulnerabilities detected**
+
+          A security issue has been automatically created with detailed information about the vulnerabilities found in this PR. Please review and address these security concerns before merging.
+
+          **Next Steps:**
+          1. Review the created security issue
+          2. Update vulnerable dependencies
+          3. Re-run the security scan
+          4. Ensure all HIGH/CRITICAL vulnerabilities are resolved
+
+          *This comment was automatically generated by the Trivy security scanner.*"
+          else
+            gh pr comment ${{ github.event.pull_request.number }} --body "✅ **Security Scan Results**
+
+          🎉 **No HIGH/CRITICAL vulnerabilities detected**
+
+          This PR has been scanned for security vulnerabilities and no critical issues were found. The code is safe to merge from a security perspective.
+
+          *This comment was automatically generated by the Trivy security scanner.*"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
