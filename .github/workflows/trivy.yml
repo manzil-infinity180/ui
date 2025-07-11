@@ -84,7 +84,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Create JQ filter for parsing vulnerabilities
+          # Create JQ filter for parsing vulnerabilities with full details
           cat <<'EOF' > filter.jq
           .Results[]? | .Vulnerabilities[]? | 
           select(.Severity == "HIGH" or .Severity == "CRITICAL") |
@@ -93,11 +93,15 @@ jobs:
             severity: .Severity,
             package: .PkgName,
             version: .InstalledVersion,
-            fixed: (.FixedVersion // "N/A")
+            fixed: (.FixedVersion // "N/A"),
+            title: .Title,
+            description: .Description,
+            cvss_score: (.CVSS // {} | .nvd // {} | .V3Score // "N/A"),
+            references: (.References // [])
           }
           EOF
           
-          # Extract unique vulnerabilities
+          # Extract unique vulnerabilities with full details
           jq -r -f filter.jq trivy-results.json > current-vulns.json
           
           # Get unique vulnerability IDs
@@ -106,6 +110,8 @@ jobs:
           
           # Check for existing issues with these vulnerability IDs
           NEW_VULNS=""
+          EXISTING_ISSUES=""
+          
           for vuln_id in $VULN_IDS; do
             echo "Checking for existing issue with vulnerability: $vuln_id"
             
@@ -118,42 +124,125 @@ jobs:
               NEW_VULNS="$NEW_VULNS $vuln_id"
             else
               echo "Found existing issue #$existing_issue for vulnerability $vuln_id"
+              EXISTING_ISSUES="$EXISTING_ISSUES #$existing_issue"
             fi
           done
           
-          # If no new vulnerabilities, exit
+          # If no new vulnerabilities, but existing ones found, add PR reference to existing issues
+          if [[ -z "$NEW_VULNS" && -n "$EXISTING_ISSUES" ]]; then
+            echo "All vulnerabilities already have existing issues. Adding PR reference to existing issues."
+            echo "create_issue=false" >> $GITHUB_OUTPUT
+            echo "existing_issues=$EXISTING_ISSUES" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # If no new vulnerabilities and no existing ones, exit
           if [[ -z "$NEW_VULNS" ]]; then
-            echo "All vulnerabilities already have existing issues. Skipping issue creation."
+            echo "No vulnerabilities found. Skipping issue creation."
             echo "create_issue=false" >> $GITHUB_OUTPUT
             exit 0
           fi
           
           echo "create_issue=true" >> $GITHUB_OUTPUT
+          echo "existing_issues=$EXISTING_ISSUES" >> $GITHUB_OUTPUT
           echo "New vulnerabilities to report: $NEW_VULNS"
           
-          # Create issue content only for new vulnerabilities
+          # Create comprehensive issue content for new vulnerabilities
           cat <<'EOF' > filter_new.jq
-          "### 🚨 New Vulnerabilities Detected in PR #${{ github.event.pull_request.number }}\n\n" +
-          "Trivy has detected the following NEW HIGH or CRITICAL vulnerabilities that don't have existing issues.\n\n" +
-          "| Severity | Package | Version | Vulnerability ID | Fix Version |\n" +
-          "|---|---|---|---|---|\n" +
+          "### 🚨 Security Vulnerabilities Detected\n\n" +
+          "**Detected in PR:** [#${{ github.event.pull_request.number }}](${{ github.event.pull_request.html_url }})\n" +
+          "**Branch:** `${{ github.event.pull_request.head.ref }}`\n" +
+          "**Scan Date:** `" + (now | strftime("%Y-%m-%d %H:%M:%S UTC")) + "`\n\n" +
+          "---\n\n" +
           (
-            .Results[]? | .Vulnerabilities[]? | 
+            [.Results[]? | .Vulnerabilities[]? | 
             select(.Severity == "HIGH" or .Severity == "CRITICAL") |
-            select(.VulnerabilityID | IN($new_vulns[])) |
-            "| " + .Severity + " | " + .PkgName + " | " + .InstalledVersion + " | [" + .VulnerabilityID + "](https://avd.aquasec.com/nvd/" + (.VulnerabilityID | ascii_downcase) + ") | " + (.FixedVersion // "N/A") + " |"
-          )
+            select(.VulnerabilityID | IN($new_vulns[]))] | 
+            group_by(.VulnerabilityID) | 
+            map(
+              .[0] | 
+              "## 🔴 " + .VulnerabilityID + " - " + .Severity + " Severity\n\n" +
+              "**CVSS Score:** " + ((.CVSS // {} | .nvd // {} | .V3Score // "N/A") | tostring) + "\n" +
+              "**Title:** " + (.Title // "N/A") + "\n\n" +
+              "### Description\n" +
+              (.Description // "No description available") + "\n\n" +
+              "### Affected Package(s)\n" +
+              "| Package | Installed Version | Fixed Version |\n" +
+              "|---------|------------------|---------------|\n" +
+              (
+                [.Results[]? | .Vulnerabilities[]? | 
+                select(.VulnerabilityID == .VulnerabilityID)] | 
+                map("| " + .PkgName + " | " + .InstalledVersion + " | " + (.FixedVersion // "N/A") + " |") | 
+                join("\n")
+              ) + "\n\n" +
+              "### References\n" +
+              (
+                if (.References // []) | length > 0 then
+                  (.References | map("- " + .) | join("\n"))
+                else
+                  "- [NVD Database](https://nvd.nist.gov/vuln/detail/" + .VulnerabilityID + ")\n" +
+                  "- [Aqua Security](https://avd.aquasec.com/nvd/" + (.VulnerabilityID | ascii_downcase) + ")"
+                end
+              ) + "\n\n" +
+              "---\n"
+            ) | 
+            join("\n")
+          ) +
+          "\n### 🔧 Remediation Steps\n\n" +
+          "1. Review the affected packages listed above\n" +
+          "2. Update to the fixed versions where available\n" +
+          "3. If no fix is available, consider:\n" +
+          "   - Finding alternative packages\n" +
+          "   - Implementing additional security measures\n" +
+          "   - Monitoring for updates\n\n" +
+          "### 📋 Next Steps\n\n" +
+          "- [ ] Assign this issue to a developer\n" +
+          "- [ ] Prioritize based on CVSS scores and affected systems\n" +
+          "- [ ] Update dependencies\n" +
+          "- [ ] Re-run security scan to verify fixes\n" +
+          "- [ ] Update this issue when resolved\n\n" +
+          "---\n" +
+          "*This issue was automatically created by Trivy vulnerability scanner*"
           EOF
           
           # Convert NEW_VULNS to JSON array for jq
-          echo "$NEW_VULNS" | tr ' ' '\n' | grep -v '^$' | jq -R . | jq -s . > new_vulns.json
+          echo "$NEW_VULNS" | tr ' ' '\n' | grep -v '^
+        id: check-duplicates
+  
+      - name: Create GitHub Issue for new vulnerabilities
+        if: steps.check-duplicates.outputs.create_issue == 'true'
+        uses: peter-evans/create-issue-from-file@v5
+        with:
+          title: ${{ steps.check-duplicates.outputs.ISSUE_TITLE }}
+          content-filepath: cve-issue-report.md
+          labels: |
+            security
+            vulnerability
+            high-priority
+          assignees: ${{ github.actor }}
           
-          # Generate issue content for new vulnerabilities only
+      - name: Comment on existing issues with PR reference
+        if: steps.check-duplicates.outputs.existing_issues != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for issue_num in ${{ steps.check-duplicates.outputs.existing_issues }}; do
+            issue_num=$(echo $issue_num | sed 's/#//')
+            echo "Adding PR reference to existing issue #$issue_num"
+            
+            gh issue comment $issue_num --body "🔗 **Related PR**: [#${{ github.event.pull_request.number }}](${{ github.event.pull_request.html_url }})
+            
+            This vulnerability was also detected in the above PR on branch \`${{ github.event.pull_request.head.ref }}\`.
+            
+            *Auto-generated by Trivy scanner on $(date)*"
+          done | jq -R . | jq -s . > new_vulns.json
+          
+          # Generate comprehensive issue content for new vulnerabilities only
           jq -r --slurpfile new_vulns new_vulns.json -f filter_new.jq trivy-results.json > cve-issue-report.md
           
           # Create a title that includes the vulnerability IDs for better searchability
           TITLE_VULNS=$(echo "$NEW_VULNS" | tr ' ' ',' | sed 's/,$//' | sed 's/^,//')
-          echo "ISSUE_TITLE=🔒 Security Vulnerabilities: $TITLE_VULNS (PR #${{ github.event.pull_request.number }})" >> $GITHUB_OUTPUT
+          echo "ISSUE_TITLE=🔒 Security Alert: $TITLE_VULNS" >> $GITHUB_OUTPUT
         id: check-duplicates
   
       - name: Create GitHub Issue for new vulnerabilities
