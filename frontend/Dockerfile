@@ -55,6 +55,7 @@ COPY --from=frontend-builder /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/templates/default.conf.template
 
 # Create startup script that respects mounted configs
+# hello_testing
 RUN echo '#!/bin/sh' > /docker-entrypoint.sh && \
     echo '# Set default envs if not passed' >> /docker-entrypoint.sh && \
     echo 'export BACKEND_URL=${BACKEND_URL:-backend:4000}' >> /docker-entrypoint.sh && \
@@ -72,3 +73,5 @@ RUN echo '#!/bin/sh' > /docker-entrypoint.sh && \
 EXPOSE 80
 ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["nginx", "-g", "daemon off;"]
+
+
